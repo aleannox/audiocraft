@@ -20,6 +20,7 @@ import warnings
 
 import numpy as np
 import torch
+import torchaudio
 import gradio as gr
 
 from audiocraft.data.audio_utils import convert_audio
@@ -106,15 +107,36 @@ def load_diffusion():
     MBD = MultiBandDiffusion.get_mbd_musicgen()
 
 
-def _do_predictions(texts, duration, progress=False, seed=4242, **gen_kwargs):
+def _do_predictions(texts, prompt_sounds, prompt_duration, duration, progress=False, seed=4242, **gen_kwargs):
     MODEL.set_generation_params(duration=duration, **gen_kwargs)
     be = time.time()
-    target_sr = 32000
-    target_ac = 1
+    processed_prompt_sounds = []
+    prompt_sample_rates = []
+    for prompt_sound in prompt_sounds:
+        if prompt_sound is None:
+            processed_prompt_sounds.append(None)
+            prompt_sample_rates.append(None)
+        else:
+            prompt_sound, prompt_sample_rate = torchaudio.load(prompt_sound)
+            if prompt_sound.dim() == 1:
+                prompt_sound = prompt_sound[None]
+            prompt_sound = prompt_sound[..., :min(int(prompt_sample_rate * prompt_duration), prompt_sound.shape[-1] - 1)]
+            processed_prompt_sounds.append(prompt_sound)
+            prompt_sample_rates.append(prompt_sample_rate)
 
     seed_everything(seed)
 
-    outputs = MODEL.generate(texts, progress=progress)
+    if any(m is not None for m in processed_prompt_sounds):
+        if len(processed_prompt_sounds) > 1:
+            print("Using only first prompt audio, multiple not supported!")
+        outputs = MODEL.generate_continuation(
+            prompt=processed_prompt_sounds[0],
+            prompt_sample_rate=prompt_sample_rates[0],
+            descriptions=texts,
+            progress=progress,
+        )
+    else:
+        outputs = MODEL.generate(texts, progress=progress)
     if USE_DIFFUSION:
         outputs_diffusion = MBD.tokens_to_wav(outputs[1])
         outputs = torch.cat([outputs[0], outputs_diffusion], dim=0)
@@ -138,7 +160,7 @@ def _do_predictions(texts, duration, progress=False, seed=4242, **gen_kwargs):
 
 
 
-def predict_full(model, decoder, text, duration, topk, topp, temperature, cfg_coef, seed, progress=gr.Progress()):
+def predict_full(model, decoder, text, prompt_sound, duration, prompt_duration, topk, topp, temperature, cfg_coef, seed, progress=gr.Progress()):
     global INTERRUPTING
     global USE_DIFFUSION
     INTERRUPTING = False
@@ -164,11 +186,18 @@ def predict_full(model, decoder, text, duration, topk, topp, temperature, cfg_co
     MODEL.set_custom_progress_callback(_progress)
 
     videos, wavs = _do_predictions(
-        [text], duration, progress=True, seed=seed,
+        [text], [prompt_sound], prompt_duration, duration, progress=True, seed=seed,
         top_k=topk, top_p=topp, temperature=temperature, cfg_coef=cfg_coef)
     if USE_DIFFUSION:
         return videos[0], wavs[0], videos[1], wavs[1]
     return videos[0], wavs[0], None, None
+
+
+def toggle_audio_src(choice):
+    if choice == "mic":
+        return gr.update(source="microphone", value=None, label="Microphone")
+    else:
+        return gr.update(source="upload", value=None, label="File")
 
 
 def toggle_diffusion(choice):
@@ -191,6 +220,11 @@ def ui_full(launch_kwargs):
             with gr.Column():
                 with gr.Row():
                     text = gr.Text(label="Input Text", interactive=True)
+                    with gr.Column():
+                        radio = gr.Radio(["file", "mic"], value="file",
+                                         label="Condition on a prompt_sound (optional) File or Mic")
+                        prompt_sound = gr.Audio(source="upload", type="filepath", label="File",
+                                          interactive=True, elem_id="prompt_sound-input")
                 with gr.Row():
                     submit = gr.Button("Submit")
                     # Adapted from https://github.com/rkfg/audiocraft/blob/long/app.py, MIT license.
@@ -201,6 +235,7 @@ def ui_full(launch_kwargs):
                     decoder = gr.Radio(["Default"], label="Decoder", value="Default", interactive=False)
                 with gr.Row():
                     duration = gr.Slider(minimum=1, maximum=120, value=10, label="Duration", interactive=True)
+                    prompt_duration = gr.Slider(minimum=0.01, maximum=10, value=1, label="Prompt Duration", interactive=True)
                 with gr.Row():
                     seed = gr.Number(label="Seed", value=42, interactive=True, precision=0)
                 with gr.Row():
@@ -211,7 +246,8 @@ def ui_full(launch_kwargs):
             with gr.Column():
                 output = gr.Video(label="Generated Audio")
                 audio_output = gr.Audio(label="Generated Audio (wav)", type='filepath')
-        submit.click(predict_full, inputs=[model, decoder, text, duration, topk, topp, temperature, cfg_coef, seed], outputs=[output, audio_output])
+        submit.click(predict_full, inputs=[model, decoder, text, prompt_sound, duration, prompt_duration, topk, topp, temperature, cfg_coef, seed], outputs=[output, audio_output])
+        radio.change(toggle_audio_src, radio, [prompt_sound], queue=False, show_progress=False)
 
         interface.queue().launch(**launch_kwargs)
 
