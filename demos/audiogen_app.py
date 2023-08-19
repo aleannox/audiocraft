@@ -11,12 +11,14 @@ import argparse
 from concurrent.futures import ProcessPoolExecutor
 import os
 from pathlib import Path
+import random
 import subprocess as sp
 from tempfile import NamedTemporaryFile
 import time
 import typing as tp
 import warnings
 
+import numpy as np
 import torch
 import gradio as gr
 
@@ -47,6 +49,15 @@ pool.__enter__()
 def interrupt():
     global INTERRUPTING
     INTERRUPTING = True
+
+
+def seed_everything(seed):
+    random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
 
 
 class FileCleaner:
@@ -95,11 +106,13 @@ def load_diffusion():
     MBD = MultiBandDiffusion.get_mbd_musicgen()
 
 
-def _do_predictions(texts, duration, progress=False, **gen_kwargs):
+def _do_predictions(texts, duration, progress=False, seed=4242, **gen_kwargs):
     MODEL.set_generation_params(duration=duration, **gen_kwargs)
     be = time.time()
     target_sr = 32000
     target_ac = 1
+
+    seed_everything(seed)
 
     outputs = MODEL.generate(texts, progress=progress)
     if USE_DIFFUSION:
@@ -125,7 +138,7 @@ def _do_predictions(texts, duration, progress=False, **gen_kwargs):
 
 
 
-def predict_full(model, decoder, text, duration, topk, topp, temperature, cfg_coef, progress=gr.Progress()):
+def predict_full(model, decoder, text, duration, topk, topp, temperature, cfg_coef, seed, progress=gr.Progress()):
     global INTERRUPTING
     global USE_DIFFUSION
     INTERRUPTING = False
@@ -151,13 +164,11 @@ def predict_full(model, decoder, text, duration, topk, topp, temperature, cfg_co
     MODEL.set_custom_progress_callback(_progress)
 
     videos, wavs = _do_predictions(
-        [text], duration, progress=True,
+        [text], duration, progress=True, seed=seed,
         top_k=topk, top_p=topp, temperature=temperature, cfg_coef=cfg_coef)
     if USE_DIFFUSION:
         return videos[0], wavs[0], videos[1], wavs[1]
     return videos[0], wavs[0], None, None
-    return videos[0], wavs[0]
-
 
 
 def toggle_diffusion(choice):
@@ -191,6 +202,8 @@ def ui_full(launch_kwargs):
                 with gr.Row():
                     duration = gr.Slider(minimum=1, maximum=120, value=10, label="Duration", interactive=True)
                 with gr.Row():
+                    seed = gr.Number(label="Seed", value=42, interactive=True, precision=0)
+                with gr.Row():
                     topk = gr.Number(label="Top-k", value=250, interactive=True)
                     topp = gr.Number(label="Top-p", value=0, interactive=True)
                     temperature = gr.Number(label="Temperature", value=1.0, interactive=True)
@@ -198,7 +211,7 @@ def ui_full(launch_kwargs):
             with gr.Column():
                 output = gr.Video(label="Generated Audio")
                 audio_output = gr.Audio(label="Generated Audio (wav)", type='filepath')
-        submit.click(predict_full, inputs=[model, decoder, text, duration, topk, topp, temperature, cfg_coef], outputs=[output, audio_output])
+        submit.click(predict_full, inputs=[model, decoder, text, duration, topk, topp, temperature, cfg_coef, seed], outputs=[output, audio_output])
 
         interface.queue().launch(**launch_kwargs)
 
