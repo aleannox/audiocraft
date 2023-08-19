@@ -11,12 +11,14 @@ import argparse
 from concurrent.futures import ProcessPoolExecutor
 import os
 from pathlib import Path
+import random
 import subprocess as sp
 from tempfile import NamedTemporaryFile
 import time
 import typing as tp
 import warnings
 
+import numpy as np
 import torch
 import gradio as gr
 
@@ -52,6 +54,15 @@ pool.__enter__()
 def interrupt():
     global INTERRUPTING
     INTERRUPTING = True
+
+
+def seed_everything(seed):
+    random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
 
 
 class FileCleaner:
@@ -101,7 +112,7 @@ def load_diffusion():
         MBD = MultiBandDiffusion.get_mbd_musicgen()
 
 
-def _do_predictions(texts, melodies, duration, progress=False, **gen_kwargs):
+def _do_predictions(texts, melodies, duration, progress=False, seed=4242, **gen_kwargs):
     MODEL.set_generation_params(duration=duration, **gen_kwargs)
     print("new batch", len(texts), texts, [None if m is None else (m[0], m[1].shape) for m in melodies])
     be = time.time()
@@ -118,6 +129,8 @@ def _do_predictions(texts, melodies, duration, progress=False, **gen_kwargs):
             melody = melody[..., :int(sr * duration)]
             melody = convert_audio(melody, sr, target_sr, target_ac)
             processed_melodies.append(melody)
+
+    seed_everything(seed)
 
     if any(m is not None for m in processed_melodies):
         outputs = MODEL.generate_with_chroma(
@@ -159,7 +172,7 @@ def predict_batched(texts, melodies):
     return res
 
 
-def predict_full(model, decoder, text, melody, duration, topk, topp, temperature, cfg_coef, progress=gr.Progress()):
+def predict_full(model, decoder, text, melody, duration, topk, topp, temperature, cfg_coef, seed, progress=gr.Progress()):
     global INTERRUPTING
     global USE_DIFFUSION
     INTERRUPTING = False
@@ -185,7 +198,7 @@ def predict_full(model, decoder, text, melody, duration, topk, topp, temperature
     MODEL.set_custom_progress_callback(_progress)
 
     videos, wavs = _do_predictions(
-        [text], [melody], duration, progress=True,
+        [text], [melody], duration, progress=True, seed=seed,
         top_k=topk, top_p=topp, temperature=temperature, cfg_coef=cfg_coef)
     if USE_DIFFUSION:
         return videos[0], wavs[0], videos[1], wavs[1]
@@ -239,6 +252,8 @@ def ui_full(launch_kwargs):
                 with gr.Row():
                     duration = gr.Slider(minimum=1, maximum=120, value=10, label="Duration", interactive=True)
                 with gr.Row():
+                    seed = gr.Number(label="Seed", value=42, interactive=True, precision=0)
+                with gr.Row():
                     topk = gr.Number(label="Top-k", value=250, interactive=True)
                     topp = gr.Number(label="Top-p", value=0, interactive=True)
                     temperature = gr.Number(label="Temperature", value=1.0, interactive=True)
@@ -250,7 +265,7 @@ def ui_full(launch_kwargs):
                 audio_diffusion = gr.Audio(label="MultiBand Diffusion Decoder (wav)", type='filepath')
         submit.click(toggle_diffusion, decoder, [diffusion_output, audio_diffusion], queue=False,
                      show_progress=False).then(predict_full, inputs=[model, decoder, text, melody, duration, topk, topp,
-                                                                     temperature, cfg_coef],
+                                                                     temperature, cfg_coef, seed],
                                                outputs=[output, audio_output, diffusion_output, audio_diffusion])
         radio.change(toggle_audio_src, radio, [melody], queue=False, show_progress=False)
 
